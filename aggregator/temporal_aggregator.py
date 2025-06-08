@@ -1,5 +1,6 @@
 # aggregator/temporal_aggregator.py
 
+import os
 import xarray as xr
 import pandas as pd
 import numpy as np
@@ -37,65 +38,61 @@ def aggregate_data_to_timeseries(da, target_freq, spatial_agg_methods, temporal_
         logger.warning("Input DataArray is None for time series aggregation. Skipping.")
         return {}
 
-    aggregated_tss = {}
     original_var_name = da.name if da.name else "unknown_var"
     
+    # Determine if temporal resampling is needed
     input_freq_str = pd.infer_freq(da['time'].values)
     resampling_needed = True
-
-    # If the input data's frequency already matches the target, no need to resample.
     if input_freq_str and input_freq_str.upper().startswith(target_freq.upper()):
         logger.debug(f"Input data frequency ({input_freq_str}) matches target ({target_freq}). Skipping temporal resampling.")
         resampling_needed = False
         
+    aggregated_da = da
+    if resampling_needed:
+        logger.debug(f"Temporally resampling '{original_var_name}' to target frequency '{target_freq}'.")
+        if target_freq.upper() in ['M', 'Y', 'A', 'AS', 'Q', 'QS']:
+            resampler = da.resample(time=target_freq.upper(), label="right", closed="right")
+        else:
+            resampler = da.resample(time=target_freq.upper(), label="left", closed="left")
+
+        normalized_temporal_agg_method = temporal_agg_method.strip().lower()
+        
+        if normalized_temporal_agg_method == 'sum':
+            aggregated_da = resampler.sum()
+        elif normalized_temporal_agg_method == 'mean':
+            aggregated_da = resampler.mean()
+        elif normalized_temporal_agg_method == 'max':
+            aggregated_da = resampler.max()
+        elif normalized_temporal_agg_method == 'min':
+            aggregated_da = resampler.min()
+        elif normalized_temporal_agg_method == 'median':
+            aggregated_da = resampler.median()
+        else:
+            raise ValueError(f"Unsupported temporal aggregation method: '{temporal_agg_method}'.")
+
+    # --- Perform all spatial aggregations ---
+    aggregated_tss = {}
     for spatial_method in spatial_agg_methods:
         try:
-            ts_da = _perform_spatial_aggregation(da, spatial_method)
-            resampled_ts_df = None
+            # Spatially aggregate the (already temporally aggregated) data
+            ts_da = _perform_spatial_aggregation(aggregated_da, spatial_method)
             
-            # --- MODIFIED: Use a consistent key and column name format ---
-            key_for_dict = f"{original_var_name}_{spatial_method}"
+            # Convert to DataFrame
+            df = ts_da.to_dataframe()
 
-            if not resampling_needed:
-                # If no temporal change is needed, just convert the spatially aggregated DataArray.
-                resampled_ts_df = ts_da.to_dataframe()
-                
-                # For 6H native output, adjust timestamp to represent the start of the interval.
-                if target_freq.upper() == '6H':
-                    logger.debug(f"Adjusting 6H timestamp for '{original_var_name}' to represent interval start.")
-                    resampled_ts_df.index = resampled_ts_df.index - pd.Timedelta(hours=6)
-            else:
-                # Perform temporal resampling
-                if target_freq.upper() in ['M', 'Y', 'A', 'AS', 'Q', 'QS']:
-                    resampler = ts_da.resample(time=target_freq.upper(), label="right", closed="right")
-                else:
-                    resampler = ts_da.resample(time=target_freq.upper(), label="left", closed="left")
+            # Adjust timestamp for 6H native output if no resampling occurred
+            if target_freq.upper() == '6H' and not resampling_needed:
+                logger.debug(f"Adjusting 6H timestamp for '{original_var_name}' to represent interval start.")
+                df.index = df.index - pd.Timedelta(hours=6)
 
-                normalized_temporal_agg_method = temporal_agg_method.strip().lower()
-                
-                if normalized_temporal_agg_method == 'sum':
-                    resampled_ts_df = resampler.sum().to_dataframe()
-                elif normalized_temporal_agg_method == 'mean':
-                    resampled_ts_df = resampler.mean().to_dataframe()
-                elif normalized_temporal_agg_method == 'max':
-                    resampled_ts_df = resampler.max().to_dataframe()
-                elif normalized_temporal_agg_method == 'min':
-                    resampled_ts_df = resampler.min().to_dataframe()
-                elif normalized_temporal_agg_method == 'median':
-                    resampled_ts_df = resampler.median().to_dataframe()
-                else:
-                    raise ValueError(f"Unsupported temporal aggregation method: '{temporal_agg_method}'.")
-
-            # Set the column name to match the key
-            if resampled_ts_df is not None:
-                resampled_ts_df.columns = [key_for_dict]
+            key = f"{original_var_name}_{spatial_method}"
+            df.columns = [key]
             
-            if resampled_ts_df is not None and not resampled_ts_df.empty:
-                aggregated_tss[key_for_dict] = resampled_ts_df
-
+            if not df.empty:
+                aggregated_tss[key] = df
         except Exception as e:
-            logger.error(f"Error during aggregation for '{original_var_name}' (spatial: {spatial_method}, target: {target_freq}): {e}", exc_info=True)
-            continue
+            logger.error(f"Failed spatial aggregation for method '{spatial_method}' on '{original_var_name}': {e}", exc_info=True)
+            
     return aggregated_tss
 
 def aggregate_data_to_netcdf(da, target_freq, temporal_agg_method):
