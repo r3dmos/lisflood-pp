@@ -35,7 +35,6 @@ def process_variable(task_args):
         task_args (tuple): A tuple containing all necessary arguments:
             (lisf_var, nc_file_path, config)
     """
-    # Unpack all arguments passed to the worker process
     lisf_var, nc_file_path, config = task_args
     worker_logger = logging.getLogger(f"worker.{lisf_var}")
 
@@ -206,20 +205,21 @@ def main():
     if settings_lis is None: sys.exit(1)
     binding = settings_lis.binding
 
+    # --- CORRECTED: In-place modification of the binding dictionary ---
     if args.maps_path:
         logger.info(f"Overriding map paths with new base directory: {args.maps_path}")
         if not os.path.isdir(args.maps_path):
             logger.error(f"Provided --maps_path is not a valid directory: {args.maps_path}")
             sys.exit(1)
-        updated_binding = {}
-        for key, value in binding.items():
-            if isinstance(value, str) and ('.nc' in value or '.map' in value) and not os.path.isabs(value):
+        
+        # Iterate over a copy of the keys to allow modification during the loop
+        for key in list(binding.keys()):
+            value = str(binding[key]) # Convert value to string for consistent checks
+            if '.nc' in value or '.map' in value:
                 original_filename = os.path.basename(value)
                 new_path = os.path.join(args.maps_path, original_filename)
-                updated_binding[key] = new_path
-            else:
-                updated_binding[key] = value
-        binding = updated_binding
+                logger.debug(f"Redirecting '{key}': from '{value}' to '{new_path}'")
+                binding[key] = new_path # Modify the dictionary in-place
         
     user_settings = {}
     try:
@@ -260,7 +260,6 @@ def main():
 
     lisf_var_paths_map = get_lisflood_output_files_and_vars(LISFLOOD_DATA_DIR, binding)
     if args.vars_to_process:
-        logger.info(f"Filtering to process only: {args.vars_to_process}")
         lisf_var_paths_map = {var: p for var, p in lisf_var_paths_map.items() if var in args.vars_to_process}
     if not lisf_var_paths_map:
         logger.info("No files to process.")
@@ -280,8 +279,8 @@ def main():
         if not pixel_area_path: logger.error("PixelAreaUser not found in settings.")
         else:
             path_to_load = pixel_area_path
-            if pixel_area_path.endswith('.map'):
-                path_to_load = os.path.splitext(pixel_area_path)[0] + '.nc'
+            if str(path_to_load).endswith('.map'):
+                path_to_load = os.path.splitext(path_to_load)[0] + '.nc'
             if os.path.exists(path_to_load):
                 area_map = load_lisflood_variable_data(path_to_load)
             else:
